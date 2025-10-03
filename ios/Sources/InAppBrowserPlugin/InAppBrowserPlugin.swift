@@ -1,6 +1,7 @@
 import Capacitor
 import OSInAppBrowserLib
 import UIKit
+import WebKit
 
 typealias OSInAppBrowserEngine = OSIABEngine<OSIABApplicationRouterAdapter, OSIABSafariViewControllerRouterAdapter, OSIABWebViewRouterAdapter>
 
@@ -41,7 +42,7 @@ public class InAppBrowserPlugin: CAPPlugin, CAPBridgedPlugin {
             }
             DispatchQueue.main.async {
                 engine.openSystemBrowser(url, options.toSystemBrowserOptions(), { [weak self] event, viewControllerToOpen in
-                    self?.handleResult(event, for: call, checking: viewControllerToOpen, data: nil, error: .failedToOpen(url: url.absoluteString, onTarget: .systemBrowser))
+                    self?.handleResult(event, for: call, checking: viewControllerToOpen, data: nil, error: .failedToOpen(url: url.absoluteString, onTarget: .systemBrowser), backgroundColor: nil)
                 })
             }
         }
@@ -56,6 +57,9 @@ public class InAppBrowserPlugin: CAPPlugin, CAPBridgedPlugin {
             let customHeaders = call.getObject("customHeaders")?.compactMapValues {
                 ($0 as? String) ?? ($0 as? NSNumber)?.stringValue
             }
+            // Extract backgroundColor from options
+            let backgroundColorHex = call.getObject("options")?["backgroundColor"] as? String
+
             DispatchQueue.main.async {
                 engine.openWebView(
                     url: url,
@@ -70,7 +74,7 @@ public class InAppBrowserPlugin: CAPPlugin, CAPBridgedPlugin {
                     onDelegateAlertController: { [weak self] alert in
                         self?.bridge?.viewController?.presentedViewController?.show(alert, sender: nil)
                     }, completionHandler: { [weak self] event, viewControllerToOpen, data  in
-                        self?.handleResult(event, for: call, checking: viewControllerToOpen, data: data, error: .failedToOpen(url: url.absoluteString, onTarget: .webView))
+                        self?.handleResult(event, for: call, checking: viewControllerToOpen, data: data, error: .failedToOpen(url: url.absoluteString, onTarget: .webView), backgroundColor: backgroundColorHex)
                     }
                 )
             }
@@ -100,7 +104,7 @@ private extension InAppBrowserPlugin {
         }
         return engine
     }
-    
+
     func handleBrowserCall(_ call: CAPPluginCall, target: OSInAppBrowserTarget, action: (URL) -> Void) {
         let urlString = call.getString("url", "")
         guard self.isSchemeValid(urlString) else {
@@ -111,7 +115,7 @@ private extension InAppBrowserPlugin {
         }
         action(url)
     }
-    
+
     func delegateExternalBrowser(_ engine: OSInAppBrowserEngine, _ url: URL, _ call: CAPPluginCall) {
         DispatchQueue.main.async {
             engine.openExternalBrowser(url) { [weak self] success in
@@ -125,13 +129,16 @@ private extension InAppBrowserPlugin {
         }
     }
 
-    func handleResult(_ event: OSIABEventType?, for call: CAPPluginCall, checking viewController: UIViewController?, data: [String: Any]?, error: OSInAppBrowserError) {
+    func handleResult(_ event: OSIABEventType?, for call: CAPPluginCall, checking viewController: UIViewController?, data: [String: Any]?, error: OSInAppBrowserError, backgroundColor: String? = nil) {
         if let event {
             if event == .pageClosed {
                 openedViewController = nil
             }
             notifyListeners(event.rawValue, data: data)
         } else if let viewController {
+            // Customize the webview BEFORE presenting
+            customizeWebView(viewController, backgroundColor: backgroundColor)
+
             present(viewController) { [weak self] in
                 self?.openedViewController = viewController
                 self?.success(call)
@@ -139,6 +146,69 @@ private extension InAppBrowserPlugin {
         } else {
             self.error(call, type: error)
         }
+    }
+
+    // New method to customize WebView background color
+    func customizeWebView(_ viewController: UIViewController?, backgroundColor: String?) {
+        guard let viewController = viewController else { return }
+
+        // Convert hex to UIColor, or use default color
+        let bgColor: UIColor
+        if let hexColor = backgroundColor {
+            bgColor = UIColor(hexString: hexColor)
+        } else {
+            // Default color if none provided
+            bgColor = UIColor.white
+        }
+
+        // Set the view controller's view background
+        viewController.view.backgroundColor = bgColor
+
+        // Find and customize the WKWebView in the view hierarchy
+        if let webView = findWebView(in: viewController.view) {
+            webView.backgroundColor = bgColor
+            webView.isOpaque = false
+            webView.scrollView.backgroundColor = bgColor
+        }
+    }
+
+    // Helper method to find WKWebView in view hierarchy
+    func findWebView(in view: UIView) -> WKWebView? {
+        if let webView = view as? WKWebView {
+            return webView
+        }
+        for subview in view.subviews {
+            if let webView = findWebView(in: subview) {
+                return webView
+            }
+        }
+        return nil
+    }
+}
+
+// Extension to convert hex string to UIColor
+extension UIColor {
+    convenience init(hexString: String) {
+        let hex = hexString.trimmingCharacters(in: CharacterSet.alphanumerics.inverted)
+        var int: UInt64 = 0
+        Scanner(string: hex).scanHexInt64(&int)
+        let a, r, g, b: UInt64
+        switch hex.count {
+        case 3: // RGB (12-bit)
+            (a, r, g, b) = (255, (int >> 8) * 17, (int >> 4 & 0xF) * 17, (int & 0xF) * 17)
+        case 6: // RGB (24-bit)
+            (a, r, g, b) = (255, int >> 16, int >> 8 & 0xFF, int & 0xFF)
+        case 8: // ARGB (32-bit)
+            (a, r, g, b) = (int >> 24, int >> 16 & 0xFF, int >> 8 & 0xFF, int & 0xFF)
+        default:
+            (a, r, g, b) = (255, 0, 0, 0)
+        }
+        self.init(
+            red: CGFloat(r) / 255.0,
+            green: CGFloat(g) / 255.0,
+            blue: CGFloat(b) / 255.0,
+            alpha: CGFloat(a) / 255.0
+        )
     }
 }
 
@@ -177,7 +247,7 @@ private extension InAppBrowserPlugin {
 }
 
 private extension OSInAppBrowserEngine {
-    
+
     func openExternalBrowser(_ url: URL, _ completionHandler: @escaping (Bool) -> Void) {
         let router = OSIABApplicationRouterAdapter()
         openExternalBrowser(url, routerDelegate: router, completionHandler)
